@@ -882,6 +882,52 @@ class TorchSpyreModelRunner(GPUModelRunner):
                 builders[layer_name] = builder
         return builders
 
+    def initialize_attn_backend(self, kv_cache_config, is_profiling: bool = False) -> None:
+        super().initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
+        self._split_attn_groups_by_layer_window()
+
+    def _split_attn_groups_by_layer_window(self) -> None:
+        """Give each distinct per-layer sliding window its own attention group."""
+        # `FullAttentionSpec.merge` collapses a hybrid decoder onto the one window it finds,
+        # clamping its full-attention layers too (gemma-3-1b-it: 512 on all 26). Spyre masks
+        # per group, not per layer as upstream does, so the group is what has to split.
+        from dataclasses import replace
+
+        from vllm.config import get_layers_from_vllm_config
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        from vllm.v1.worker.utils import AttentionGroup
+
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for kv_cache_group_id, groups in enumerate(self.attn_groups):
+            split_groups: list[AttentionGroup] = []
+            for group in groups:
+                spec = group.kv_cache_spec
+                windows: dict[int | None, list[str]] = {}
+                for layer_name in group.layer_names:
+                    window = getattr(layers.get(layer_name), "sliding_window", None)
+                    windows.setdefault(window, []).append(layer_name)
+                # SlidingWindowSpec is single-window by construction; UniformTypeKVCacheSpecs
+                # is already unwrapped per layer upstream.
+                if not isinstance(spec, FullAttentionSpec) or len(windows) <= 1:
+                    split_groups.append(group)
+                    continue
+                logger.info(
+                    "Split %d attention layers into %d groups by sliding window %s.",
+                    len(group.layer_names),
+                    len(windows),
+                    {w: len(n) for w, n in windows.items()},
+                )
+                for window, layer_names in windows.items():
+                    split_groups.append(
+                        AttentionGroup(
+                            group.backend,
+                            layer_names,
+                            replace(spec, sliding_window=window),
+                            kv_cache_group_id,
+                        )
+                    )
+            self.attn_groups[kv_cache_group_id] = split_groups
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -1178,10 +1224,10 @@ class TorchSpyreModelRunner(GPUModelRunner):
 
         from spyre_inference.v1.attention.ops.layout import slot_major_kv_layout
 
-        # One spec per layer. disable_hybrid_kv_cache_manager (set in the
-        # platform) collapses hybrid models into a single UniformTypeKVCacheSpecs
-        # group; unwrap it to the real per-layer specs so each layer keeps its own
-        # num_kv_heads/head_size. Non-hybrid groups expose the spec directly.
+        # One spec per layer. disable_hybrid_kv_cache_manager (set in the platform)
+        # collapses hybrid models into a single group; when the layers' head shapes differ
+        # its spec is a UniformTypeKVCacheSpecs, which unwraps to the real per-layer specs
+        # so each layer keeps its own num_kv_heads/head_size. A merged spec is direct.
         spec_by_layer = {}
         for group in kv_cache_config.kv_cache_groups:
             per_layer = getattr(group.kv_cache_spec, "kv_cache_specs", None)
