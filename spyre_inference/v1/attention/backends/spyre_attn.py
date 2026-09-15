@@ -724,6 +724,19 @@ class SpyreAttentionMetadataBuilder(AttentionMetadataBuilder[SpyreAttentionMetad
                     max(padded_num_blocks[s] for s in group) * block_size,
                     torch.device("cpu"),
                 )
+                if aligned_query_len == 1:
+                    # One unbind beats a __getitem__ per tile at decode tile counts; the
+                    # clones stay, for storage offset 0 (torch-spyre#3770).
+                    # Width 1 only: wider needs a permute that copies the whole mask.
+                    tiles_by_block = mask_cpu.reshape(
+                        len(group), mask_cpu.shape[-1] // block_size, 1, block_size
+                    )
+                    for row, s in enumerate(group):
+                        attention_mask_tiles[s] = [
+                            tile.clone(memory_format=torch.contiguous_format)
+                            for tile in tiles_by_block[row].unbind(0)[: padded_num_blocks[s]]
+                        ]
+                    continue
                 for row, s in enumerate(group):
                     # `.contiguous()` is a no-op on a [1, N] slice, leaving
                     # stride(0) == the mask width and a nonzero storage offset
