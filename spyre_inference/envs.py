@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     SPYRE_ATTN_KV_LAYOUT: str = "token_major"
     SPYRE_BATCHED_DECODE: bool = True
     SPYRE_KERNEL_CACHE: bool = False
+    SPYRE_MAX_NUM_PARTIAL_PREFILLS: int = 1
     SPYRE_NUM_CPUS: int = 0
     SPYRE_UPDATE_THREAD_CONFIG: bool = True
 
@@ -82,6 +83,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # disk. Off by default. TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 disables the cache
     # even when this flag is enabled.
     "SPYRE_KERNEL_CACHE": lambda: os.getenv("SPYRE_KERNEL_CACHE", "0") == "1",
+    # Maximum number of sequences allowed to prefill in the same batch. "1" (default)
+    # serialises prefills, so a batch spends the whole token budget on one prompt
+    # instead of topping itself up with a short chunk of the next. Any non-positive
+    # value removes the cap, as does a pooling runner, which never decodes.
+    "SPYRE_MAX_NUM_PARTIAL_PREFILLS": lambda: int(os.getenv("SPYRE_MAX_NUM_PARTIAL_PREFILLS", "1")),
     # CPU budget used to size thread pools. "0" (default) auto-detects the budget
     # (cgroup CPU quota, then physical core count).
     "SPYRE_NUM_CPUS": lambda: int(os.getenv("SPYRE_NUM_CPUS", "0")),
