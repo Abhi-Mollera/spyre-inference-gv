@@ -38,6 +38,10 @@ from spyre_inference.v1.attention.backends.spyre_head_major_attn import (
     SpyreHeadMajorAttentionBackend,
     SpyreHeadMajorAttentionImpl,
 )
+from spyre_inference.v1.attention.ops.page_attn_head_major import (
+    page_attn_head_major_decode_kernel,
+    page_attn_head_major_kernel,
+)
 from spyre_inference.v1.attention.ops.reshape_and_cache_head_major import (
     reshape_and_cache_head_major_kernel,
 )
@@ -789,3 +793,47 @@ def test_runner_allocates_head_major_for_a_head_major_layer():
 
     del caches, k_pages, v_pages
     gc.collect()
+
+
+def test_decode_fold_matches_unrolled():
+    """The folded decode kernel is the unrolled one rebatched, so it must agree exactly."""
+    set_random_seed(0)
+    kv, qpk, d, block, blocks = 8, 4, 128, 64, 5
+    heads = kv * qpk
+    k = torch.randn(blocks * kv, block, d)
+    v = torch.randn(blocks * kv, block, d)
+    query = torch.randn(3, heads, d)
+    rows = torch.tensor([2, 0, 1], dtype=torch.int32)
+    kv_tables = [
+        torch.tensor([[p * kv + h] for h in range(kv)], dtype=torch.int32) for p in range(blocks)
+    ]
+    head_tables = [
+        torch.tensor([h * qpk + g for h in range(kv)], dtype=torch.int32) for g in range(qpk)
+    ]
+    masks = [torch.zeros(1, block) for _ in range(blocks)]
+    masks[-1][0, block // 2 :] = torch.finfo(torch.float32).min
+
+    for soft_cap in (0.0, 30.0):
+        args = (
+            query,
+            rows,
+            k,
+            v,
+            kv_tables,
+            head_tables,
+            masks,
+            d**-0.5,
+            blocks,
+            1,
+            heads,
+            kv,
+            d,
+            block,
+            soft_cap,
+            None,
+        )
+        unrolled = page_attn_head_major_kernel(*args)
+        # The folded kernel needs no head gather, so it takes no head index tables.
+        folded = page_attn_head_major_decode_kernel(*args[:5], *args[6:])
+        assert folded.shape == unrolled.shape
+        torch.testing.assert_close(folded, unrolled, atol=1e-5, rtol=1e-5)

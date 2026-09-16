@@ -42,7 +42,10 @@ from spyre_inference.v1.attention.backends.spyre_attn import (
     _call_kernel,
 )
 from spyre_inference.v1.attention.ops.layout import head_major_kv_layout
-from spyre_inference.v1.attention.ops.page_attn_head_major import page_attn_head_major_kernel
+from spyre_inference.v1.attention.ops.page_attn_head_major import (
+    page_attn_head_major_decode_kernel,
+    page_attn_head_major_kernel,
+)
 from spyre_inference.v1.attention.ops.reshape_and_cache_head_major import (
     reshape_and_cache_head_major_kernel,
 )
@@ -52,6 +55,7 @@ logger = init_logger(__name__)
 # Compiled apart from the token-major kernels: same reason those are compiled at module
 # scope, and a shared artifact would guard on the page shape either way.
 _page_attn_compiled = torch.compile(page_attn_head_major_kernel, dynamic=False)
+_page_attn_decode_compiled = torch.compile(page_attn_head_major_decode_kernel, dynamic=False)
 
 _SPYRE_CORES = 32
 _LX_ATTN_CORES = 8
@@ -120,6 +124,7 @@ class SpyreHeadMajorAttentionImpl(SpyreAttentionImpl):
         # by upcasting the int32 index to int64. Attention compiles in its own domain, so
         # this leaves the rest of the model eager.
         self._attn_fn = _page_attn_compiled
+        self._decode_attn_fn = _page_attn_decode_compiled
         if self.alibi_slopes is not None:
             raise NotImplementedError(
                 "ALiBi is not supported on the head-major KV layout; use the default "
@@ -229,16 +234,23 @@ class SpyreHeadMajorAttentionImpl(SpyreAttentionImpl):
                 for g in range(self.num_queries_per_kv)
             ]
 
+        # The folded kernel carries num_heads output units; lifting the cap for it
+        # measured no difference, so it is left as is.
+        if padded_query_len == 1:
+            attn_fn, head_tables = self._decode_attn_fn, ()
+        else:
+            attn_fn, head_tables = self._attn_fn, (self._head_index_tables,)
+
         with _capped_cores(self.num_kv_heads * padded_query_len):
             return _call_kernel(
                 "page attention",
-                self._attn_fn,
+                attn_fn,
                 query,
                 row_table,
                 k_folded,
                 v_folded,
                 index_table,
-                self._head_index_tables,
+                *head_tables,
                 mask_tiles,
                 self.scale,
                 num_blocks,
