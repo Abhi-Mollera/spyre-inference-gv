@@ -406,6 +406,7 @@ class _SpyreModelWrapper:
         # Check whether the underlying model's embed_input_ids accepts
         # multimodal_embeddings itself (i.e. handles the merge internally).
         import inspect
+
         model_embed_sig = inspect.signature(self._model.embed_input_ids)
         model_owns_merge = "multimodal_embeddings" in model_embed_sig.parameters
 
@@ -417,10 +418,14 @@ class _SpyreModelWrapper:
             # (language_model.model.embed_tokens) needs weights on CPU; moving
             # the whole model would be prohibitively expensive.
             input_ids_cpu = convert(input_ids, dtype=torch.int64, device="cpu")
-            mm_embeds_cpu = tree_map(
-                lambda t: convert(t, device="cpu") if isinstance(t, torch.Tensor) else t,
-                multimodal_embeddings,
-            ) if has_mm else multimodal_embeddings
+            mm_embeds_cpu = (
+                tree_map(
+                    lambda t: convert(t, device="cpu") if isinstance(t, torch.Tensor) else t,
+                    multimodal_embeddings,
+                )
+                if has_mm
+                else multimodal_embeddings
+            )
             is_multimodal_cpu = (
                 is_multimodal.to("cpu")
                 if isinstance(is_multimodal, torch.Tensor)
@@ -429,7 +434,8 @@ class _SpyreModelWrapper:
             # Move only the token embedding table to CPU; restore after.
             embed_tokens = getattr(
                 getattr(getattr(self._model, "language_model", None), "model", None),
-                "embed_tokens", None,
+                "embed_tokens",
+                None,
             )
             if embed_tokens is not None:
                 embed_tokens.to("cpu")
@@ -499,7 +505,9 @@ class _SpyreModelWrapper:
         merged = _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=mm_embeds_cpu,
-            is_multimodal=is_multimodal.to("cpu") if isinstance(is_multimodal, torch.Tensor) else is_multimodal,
+            is_multimodal=is_multimodal.to("cpu")
+            if isinstance(is_multimodal, torch.Tensor)
+            else is_multimodal,
         )
         return convert(merged, device=self._spyre_device)
 
@@ -664,7 +672,7 @@ class TorchSpyreModelRunner(GPUModelRunner):
 
         # Patches instances, so it runs after load and before compile wraps modules
         # in OptimizedModule and breaks traversal.
-        #apply_multimodal_patches(self.model, self._spyre_device)
+        # apply_multimodal_patches(self.model, self._spyre_device)
 
         # Compile for Spyre (no-op if enforce_eager=True)
         self._compile_for_spyre()

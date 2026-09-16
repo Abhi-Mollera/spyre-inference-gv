@@ -21,8 +21,12 @@ implementations by layer class.
 
 import torch
 
-from . import pixtral
-from . import blip2, granite4_vision, siglip
+from . import (
+    blip2,
+    granite4_vision,
+    pixtral,
+    siglip,
+)
 
 
 def apply_multimodal_patches(model: torch.nn.Module, device: torch.device) -> None:
@@ -31,7 +35,7 @@ def apply_multimodal_patches(model: torch.nn.Module, device: torch.device) -> No
     A no-op for text-only models. Call after weights are on the device but before
     compile, which wraps modules in `OptimizedModule` and breaks traversal.
     """
-        # Check if the model is a multimodal model (e.g. has vision_tower, vision_encoder,
+    # Check if the model is a multimodal model (e.g. has vision_tower, vision_encoder,
     # vision_model, etc.)
     mm_attrs = (
         "vision_encoder",
