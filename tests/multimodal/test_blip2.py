@@ -184,33 +184,41 @@ def test_patched_forward_with_cross_attention_matches_stock(tp_group):
 
 
 # ---------------------------------------------------------------------------
-# 4. On-card: module restored to device after call (skipped without Spyre)
+# 4. Weights stay on CPU after move_blip2_qformer_weights_to_cpu
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.blip2
 def test_patched_forward_restores_module_to_spyre(tp_group):
-    """The patched forward moves `self` to CPU for the call and must restore
-    it to Spyre afterward — a failure here would silently strand the module
-    on CPU, causing every subsequent layer to get a CPU input on Spyre."""
-    if not spyre_available():
-        pytest.skip("Spyre device not available")
+    """move_blip2_qformer_weights_to_cpu pins weights to CPU permanently.
 
-    from spyre_inference.multimodal.blip2 import patch_blip2_qformer_attention
+    The patched forward no longer round-trips weights — they stay on CPU so
+    only activations cross the PCIe bus per call. This test verifies that
+    after move_blip2_qformer_weights_to_cpu all parameters are on CPU and
+    remain there after a forward pass with CPU input tensors.
+    """
+    from spyre_inference.multimodal.blip2 import (
+        move_blip2_qformer_weights_to_cpu,
+        patch_blip2_qformer_attention,
+    )
 
     patch_blip2_qformer_attention()
+    attn = _make_qformer_attention(tp_group)  # starts on CPU
 
-    device = torch.device("spyre")
-    attn = _make_qformer_attention(tp_group).to(device)
+    container = nn.Module()
+    container.add_module("attn", attn)
+    move_blip2_qformer_weights_to_cpu(container)
 
-    hidden_states = torch.randn(1, 8, HIDDEN_SIZE, dtype=torch.float16).to(device)
-    blip2.Blip2QFormerMultiHeadAttention.forward(attn, hidden_states)
-
-    # All parameters must be back on Spyre after the call.
     for name, param in attn.named_parameters():
-        assert param.device.type == "spyre", (
-            f"parameter {name!r} is on {param.device} after patched forward — "
-            "module was not restored to Spyre"
+        assert param.device.type == "cpu", (
+            f"parameter {name!r} is on {param.device} after move — expected cpu"
+        )
+
+    hidden_states = torch.randn(1, 8, HIDDEN_SIZE, dtype=torch.float16)
+    blip2.Blip2QFormerMultiHeadAttention.forward(attn, hidden_states)
+    for name, param in attn.named_parameters():
+        assert param.device.type == "cpu", (
+            f"parameter {name!r} moved off CPU after forward — weights should stay pinned"
         )
 
 
