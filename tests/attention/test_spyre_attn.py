@@ -1736,6 +1736,62 @@ def test_batched_decode_chunking_covers_every_block(
         assert num_chunks * bpc == padded
 
 
+def test_batched_decode_mask_follows_the_layers_num_kv_heads(
+    default_vllm_config,
+    enable_batched_decode,
+) -> None:
+    """The decode mask is broadcast over the KV-cache spec's head count.
+
+    A model with per-layer head counts (gemma-4) has attention layers whose
+    num_kv_heads is not `model_config.get_num_kv_heads()`. The kernel reshapes the
+    mask with the layer's, so building it from the model-level one asks for the
+    wrong number of elements and every batched-decode variant fails to compile.
+    """
+    from vllm.config import get_current_vllm_config
+
+    torch.set_default_device("cpu")
+    block_size = 128
+    # This group's own counts; get_num_kv_heads() reports 8 below, the 4x-too-wide
+    # broadcast this guards against.
+    num_kv_heads, num_query_heads, head_size = 2, 4, 64
+
+    vllm_config = get_current_vllm_config()
+    vllm_config.scheduler_config.max_num_seqs = _MIN_BATCHED_SEQS
+    vllm_config.model_config.max_model_len = 2048
+
+    num_seqs = _MIN_BATCHED_SEQS
+    ctx = 256
+    blocks_per_seq = ctx // block_size
+    seq_lens = torch.full((num_seqs,), ctx, dtype=torch.int32)
+    query_start_loc = torch.arange(num_seqs + 1, dtype=torch.int32)
+    block_table = torch.arange(num_seqs * blocks_per_seq, dtype=torch.int32).reshape(
+        num_seqs, blocks_per_seq
+    )
+    slot_mapping = (seq_lens.to(torch.int64) - 1) + torch.arange(num_seqs) * ctx
+
+    md = _build_metadata(
+        num_query_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        block_size=block_size,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        block_table=block_table,
+        slot_mapping=slot_mapping,
+        model_num_kv_heads=8,
+    )
+
+    assert md.blocks_per_chunk is not None, "batched decode declined this batch"
+    assert md.mask_by_chunk_cpu is not None
+    entries = md.padded_num_seqs * md.blocks_per_chunk
+    assert md.mask_by_chunk_cpu.shape[1] == entries * num_kv_heads, (
+        f"mask has {md.mask_by_chunk_cpu.shape[1]} rows; the kernel reshapes it to "
+        f"{entries} x {num_kv_heads}"
+    )
+    # The shape the kernel actually asks for.
+    md.mask_by_chunk_cpu[0].reshape(entries, num_kv_heads, 1, block_size)
+
+
 def _decode_reference_fp32(
     query: torch.Tensor,
     k_pages: torch.Tensor,

@@ -54,15 +54,23 @@ def _build_metadata(
     block_table: torch.Tensor,
     slot_mapping: torch.Tensor,
     sliding_window: int | None = None,
+    model_num_kv_heads: int | None = None,
 ):
-    """Use the real SpyreAttentionMetadataBuilder to construct metadata."""
+    """Use the real SpyreAttentionMetadataBuilder to construct metadata.
+
+    ``model_num_kv_heads`` is what ``model_config.get_num_kv_heads()`` reports, for
+    the per-layer-head-count models where that differs from the spec's; it defaults
+    to agreeing with ``num_kv_heads``.
+    """
     from vllm.config import get_current_vllm_config
 
     # Reuse the VllmConfig set up by the `default_vllm_config` fixture and
     # stub the head-count methods the builder reads.
     vllm_config = get_current_vllm_config()
     vllm_config.model_config.get_num_attention_heads = Mock(return_value=num_query_heads)
-    vllm_config.model_config.get_num_kv_heads = Mock(return_value=num_kv_heads)
+    vllm_config.model_config.get_num_kv_heads = Mock(
+        return_value=num_kv_heads if model_num_kv_heads is None else model_num_kv_heads
+    )
     # The builder asserts these agree, and derives its padding buckets from the
     # cache_config one, so a test block_size has to be set in both places.
     vllm_config.cache_config.block_size = block_size
