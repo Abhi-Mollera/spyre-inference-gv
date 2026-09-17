@@ -216,11 +216,18 @@ def test_patched_forward_restores_module_to_spyre(tp_group):
 
 @pytest.mark.blip2
 def test_patched_forward_output_matches_cpu_on_spyre(tp_group):
-    """The patched forward on-card must equal the same forward on CPU."""
+    """The patched forward with a Spyre input tensor must equal the CPU forward.
+
+    With permanent CPU weights, the module is NOT moved to Spyre — weights stay
+    on CPU and only the input activations cross the PCIe bus via convert().
+    """
     if not spyre_available():
         pytest.skip("Spyre device not available")
 
-    from spyre_inference.multimodal.blip2 import patch_blip2_qformer_attention
+    from spyre_inference.multimodal.blip2 import (
+        move_blip2_qformer_weights_to_cpu,
+        patch_blip2_qformer_attention,
+    )
 
     patch_blip2_qformer_attention()
 
@@ -230,9 +237,12 @@ def test_patched_forward_output_matches_cpu_on_spyre(tp_group):
     attn_cpu = _make_qformer_attention(tp_group)
     expected = blip2.Blip2QFormerMultiHeadAttention.forward(attn_cpu, hidden_states)
 
+    # Weights stay on CPU permanently — only move the input to Spyre.
     device = torch.device("spyre")
-    attn_dev = _make_qformer_attention(tp_group).to(device)
-    actual = blip2.Blip2QFormerMultiHeadAttention.forward(attn_dev, hidden_states.to(device))
+    container = nn.Module()
+    container.add_module("attn", attn_cpu)
+    move_blip2_qformer_weights_to_cpu(container)
+    actual = blip2.Blip2QFormerMultiHeadAttention.forward(attn_cpu, hidden_states.to(device))
 
     assert actual.shape == expected.shape
     torch.testing.assert_close(actual.cpu().float(), expected.float(), atol=2e-2, rtol=2e-2)
