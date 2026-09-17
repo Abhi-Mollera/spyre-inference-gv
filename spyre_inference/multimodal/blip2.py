@@ -25,12 +25,14 @@ logger = init_logger(__name__)
 
 
 def patch_blip2_qformer_attention() -> None:
-    """Run Blip2QFormerMultiHeadAttention.forward on CPU.
+    """Patch Blip2QFormerMultiHeadAttention.forward to run on CPU.
 
     The full forward contains permute/matmul/softmax chains that produce
     non-contiguous layouts Spyre's restickify and bmm_padding passes cannot reconcile.
-    Run entirely on CPU. Weights (query/key/value linears) live on Spyre, so we move
-    the whole module to CPU for the call and restore it after.
+    Run entirely on CPU. The forward patch only converts activations (not weights)
+    on each call — weights are moved to CPU once at apply() time via
+    move_blip2_qformer_weights_to_cpu(), eliminating 2 PCIe weight round-trips
+    per layer per image (24 transfers saved across 12 Q-Former layers).
     """
     try:
         from vllm.model_executor.models.blip2 import Blip2QFormerMultiHeadAttention
@@ -47,11 +49,7 @@ def patch_blip2_qformer_attention() -> None:
         hidden_states = convert(hidden_states, device="cpu")
         if encoder_hidden_states is not None:
             encoder_hidden_states = convert(encoder_hidden_states, device="cpu")
-        self.to("cpu")
-        try:
-            out = _orig_blip2_attn_forward(self, hidden_states, encoder_hidden_states)
-        finally:
-            self.to(target_device)
+        out = _orig_blip2_attn_forward(self, hidden_states, encoder_hidden_states)
         return convert(out, device=target_device)
 
     _blip2_attn_forward_cpu._spyre_patched = True  # type: ignore[attr-defined]
@@ -62,6 +60,32 @@ def patch_blip2_qformer_attention() -> None:
     )
 
 
+def move_blip2_qformer_weights_to_cpu(model: torch.nn.Module) -> None:
+    """Move all Blip2QFormerMultiHeadAttention weights to CPU permanently.
+
+    Called once at apply() time so the per-forward patch only needs to transfer
+    activations, not weights. Eliminates 2 PCIe weight round-trips per layer
+    per image (self.to('cpu') + self.to(device) inside the forward patch).
+    """
+    try:
+        from vllm.model_executor.models.blip2 import Blip2QFormerMultiHeadAttention
+    except ImportError:
+        return
+
+    moved = 0
+    for module in model.modules():
+        if isinstance(module, Blip2QFormerMultiHeadAttention):
+            module.to("cpu")
+            moved += 1
+    if moved:
+        logger.info(
+            "Spyre: moved %d Blip2QFormerMultiHeadAttention modules to CPU permanently "
+            "(weights stay on CPU; only activations are transferred per call).",
+            moved,
+        )
+
+
 def apply(model: torch.nn.Module, device: torch.device) -> None:
     """Apply BLIP-2 Q-Former workarounds."""
     patch_blip2_qformer_attention()
+    move_blip2_qformer_weights_to_cpu(model)
