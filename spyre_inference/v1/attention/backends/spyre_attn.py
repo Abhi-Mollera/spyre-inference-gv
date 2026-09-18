@@ -1179,12 +1179,15 @@ class SpyreAttentionImpl(AttentionImpl[SpyreAttentionMetadata]):
         kernel reads its arguments from storage offset 0 (torch-spyre#3770), so a
         slice past row 0 reads the wrong storage. Allocated whole (hence at offset
         0) and reused, at one size for the whole run.
+
+        Row-outermost: the kernels gather from and scatter into the row axis, which the
+        default tiled layout would relayout whole per call.
         """
         if self._staging is None:
             shape = (self.staging_rows, self.num_heads, self.head_size)
             self._staging = (
-                convert(torch.zeros(shape, dtype=self.model_dtype), device=device),
-                convert(torch.zeros(shape, dtype=self.model_dtype), device=device),
+                convert(torch.zeros(shape, dtype=self.model_dtype), device, row_major=True),
+                convert(torch.zeros(shape, dtype=self.model_dtype), device, row_major=True),
             )
         return self._staging
 
