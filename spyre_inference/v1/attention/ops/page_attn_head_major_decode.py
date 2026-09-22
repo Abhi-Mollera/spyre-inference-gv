@@ -31,7 +31,7 @@ def page_attn_head_major_decode_kernel(
     k_pages,
     v_pages,
     kv_index_tables,
-    mask_tiles,
+    mask_stack,
     scale,
     num_blocks,
     padded_query_len,
@@ -55,9 +55,10 @@ def page_attn_head_major_decode_kernel(
         k_pages / v_pages: [num_pages_total * num_kv_heads, block_size, head_size]
         kv_index_tables: per active block, a [num_kv_heads, 1] int32 device tensor of that
             block's ``page * num_kv_heads + kv`` rows. One real tensor per block, not a
-            slice of a table: an index tensor reaches the hardware as a tensor argument,
-            so a slice's nonzero storage offset is dropped (torch-spyre#3770).
-        mask_tiles: [num_blocks], each [padded_query_len, block_size]
+            slice of a table: an int32 argument's nonzero storage offset is still read as 0
+            (torch-spyre#3770 is closed, but its fix covers float16 only), and an in-graph
+            slice of a stacked one silently gathers the wrong rows at this shape.
+        mask_stack: [num_blocks, padded_query_len, block_size], sliced per block in-graph.
         out: buffer to store into, or None to return the result instead.
 
     Returns [padded_query_len, num_heads, head_size], or ``out``.
@@ -86,7 +87,7 @@ def page_attn_head_major_decode_kernel(
             scores = torch.tanh(scores / logits_soft_cap) * logits_soft_cap
         # At one query row the mask is head-independent, so its [1, block_size] tile
         # broadcasts across the folded group axis.
-        scores = scores + mask_tiles[i]
+        scores = scores + mask_stack[i]
         scores_max = torch.amax(scores, dim=-1, keepdim=True)
 
         if i == 0:
