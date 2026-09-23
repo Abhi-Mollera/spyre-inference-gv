@@ -564,7 +564,6 @@ class _SpyreModelWrapper:
           because upstream scatters image rows with a dim-0 boolean mask that
           Spyre cannot do.
         """
-        has_mm = multimodal_embeddings is not None and len(multimodal_embeddings) > 0
 
         if self._model_owns_merge:
             # Delegate fully to the model's own embed_input_ids.
@@ -580,7 +579,7 @@ class _SpyreModelWrapper:
                     lambda t: convert(t, device="cpu") if isinstance(t, torch.Tensor) else t,
                     multimodal_embeddings,
                 )
-                if has_mm
+                if multimodal_embeddings is not None and len(multimodal_embeddings) > 0
                 else multimodal_embeddings
             )
 
