@@ -166,10 +166,7 @@ def patch_embed_input_ids() -> None:
         # even on pure-text decode steps.
         buf0 = self._ds_buffers[0]
         if buf0.device != dev or buf0.dtype != text_embeds.dtype:
-            self._ds_buffers = [
-                b.to(device=dev, dtype=text_embeds.dtype)
-                for b in self._ds_buffers
-            ]
+            self._ds_buffers = [b.to(device=dev, dtype=text_embeds.dtype) for b in self._ds_buffers]
 
         if not has_vision:
             self._ds_num_tokens = 0
@@ -228,9 +225,7 @@ def migrate_ds_buffers(model: torch.nn.Module, device: torch.device) -> None:
     except StopIteration:
         dtype = torch.float16
     model._ds_buffers = [b.to(device=device, dtype=dtype) for b in ds_buffers]
-    logger.info(
-        "Spyre: moved Granite4Vision _ds_buffers to %s (%s).", device, dtype
-    )
+    logger.info("Spyre: moved Granite4Vision _ds_buffers to %s (%s).", device, dtype)
 
 
 def apply(model: torch.nn.Module, device: torch.device) -> None:
