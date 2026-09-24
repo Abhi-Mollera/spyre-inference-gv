@@ -104,7 +104,138 @@ def patch_pack_and_unpad_image_features() -> None:
     )
 
 
+def patch_embed_input_ids() -> None:
+    """Replace the two boolean-mask index_puts in embed_input_ids; keep the lookup on card.
+
+    Upstream's Granite4VisionForConditionalGeneration.embed_input_ids has two
+    ``aten::_index_put_impl_`` calls that Spyre cannot execute:
+
+    1. ``text_embeds[is_multimodal] = 0.0``   (zero image-token positions)
+    2. ``target[is_multimodal] = level_features[level_idx]``  (fill deepstack buffers)
+
+    Fix for (1): replace with ``torch.where(mask, zeros, text_embeds)`` — a
+    broadcast select that stays on Spyre.
+
+    Fix for (2): scatter on CPU into a staging tensor the same size as the
+    buffer slice, then copy back with ``target.copy_(staged)``.  The persistent
+    ``_ds_buffers`` remain full-size (``[max_tokens, lm_hidden]``) so forward's
+    ``self._ds_buffers[lvl][:n]`` slices are always valid.
+
+    ``all_packed.split(lm_h, dim=-1)`` produces last-dim views of the device
+    tensor; fetching each selected slice to CPU is cheap (image tokens only).
+    """
+    try:
+        from vllm.model_executor.models.granite4_vision import (
+            Granite4VisionForConditionalGeneration,
+        )
+    except ImportError:
+        return
+
+    if getattr(
+        Granite4VisionForConditionalGeneration.embed_input_ids,
+        "_spyre_patched",
+        False,
+    ):
+        return
+
+    def _embed_input_ids_spyre(
+        self: Granite4VisionForConditionalGeneration,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = True,
+    ) -> torch.Tensor:
+        lm_inner = self.language_model.model
+
+        has_vision = (
+            multimodal_embeddings is not None
+            and is_multimodal is not None
+            and len(multimodal_embeddings) > 0
+            and is_multimodal.any()
+        )
+
+        # 1. Text embeddings (on Spyre)
+        text_embeds = lm_inner.embed_input_ids(input_ids)
+        dev = text_embeds.device
+
+        # Ensure persistent buffers are on the right device/dtype (first call or
+        # after model.to()).  This must run on both the vision and text-only paths:
+        # forward() passes _ds_buffers[:n] directly to IntermediateTensors regardless
+        # of whether there are images, so CPU buffers cause a device-mismatch crash
+        # even on pure-text decode steps.
+        buf0 = self._ds_buffers[0]
+        if buf0.device != dev or buf0.dtype != text_embeds.dtype:
+            self._ds_buffers = [
+                b.to(device=dev, dtype=text_embeds.dtype)
+                for b in self._ds_buffers
+            ]
+
+        if not has_vision:
+            self._ds_num_tokens = 0
+            return text_embeds * lm_inner.config.embedding_multiplier
+
+        # 2. Zero image positions via torch.where (no index_put on Spyre).
+        #    mask shape: [N] → unsqueeze to [N, 1] for broadcast over hidden dim.
+        mask = convert(is_multimodal, device=dev).unsqueeze(-1)
+        text_embeds = torch.where(mask, torch.zeros_like(text_embeds), text_embeds)
+
+        # 3. Apply embedding_multiplier
+        inputs_embeds = text_embeds * lm_inner.config.embedding_multiplier
+
+        # 4. Split packed tensors → per-level features; fill _ds_buffers on CPU.
+        N, lm_h = inputs_embeds.shape
+        assert multimodal_embeddings is not None
+        # Move packed mm features to CPU for the scatter (image tokens only — cheap).
+        all_packed_cpu = torch.cat(
+            [convert(t, dtype=inputs_embeds.dtype, device="cpu") for t in multimodal_embeddings],
+            dim=0,
+        )
+        level_features_cpu = all_packed_cpu.split(lm_h, dim=-1)  # num_levels tensors on CPU
+
+        is_multimodal_cpu = convert(is_multimodal, device="cpu")
+        for level_idx in range(len(self._ds_layer_indices)):
+            # Scatter on CPU into a staging slice, then copy to the device buffer.
+            staged = torch.zeros(N, lm_h, dtype=inputs_embeds.dtype)
+            staged[is_multimodal_cpu] = level_features_cpu[level_idx]
+            self._ds_buffers[level_idx][:N].copy_(staged)
+
+        self._ds_num_tokens = N
+        return inputs_embeds
+
+    _embed_input_ids_spyre._spyre_patched = True  # type: ignore[attr-defined]
+    Granite4VisionForConditionalGeneration.embed_input_ids = _embed_input_ids_spyre  # type: ignore[method-assign]
+    logger.info(
+        "Spyre: patched Granite4VisionForConditionalGeneration.embed_input_ids"
+        " (boolean-mask index_put replaced with torch.where / CPU scatter)."
+    )
+
+
+def migrate_ds_buffers(model: torch.nn.Module, device: torch.device) -> None:
+    """Move Granite4Vision _ds_buffers to the target device and model dtype.
+
+    _ds_buffers are plain tensors (not nn.Parameter, not register_buffer), so
+    model.to() does not touch them.  They must be on the same device as
+    hidden_states before the first forward call — including the warmup pass,
+    which calls forward() directly without going through embed_input_ids.
+    """
+    ds_buffers = getattr(model, "_ds_buffers", None)
+    if ds_buffers is None:
+        return
+    # Infer dtype from the first parameter (embedding table is always present).
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        dtype = torch.float16
+    model._ds_buffers = [b.to(device=device, dtype=dtype) for b in ds_buffers]
+    logger.info(
+        "Spyre: moved Granite4Vision _ds_buffers to %s (%s).", device, dtype
+    )
+
+
 def apply(model: torch.nn.Module, device: torch.device) -> None:
     """Apply Granite 4 Vision workarounds."""
     patch_interpolate_downsampler()
     patch_pack_and_unpad_image_features()
+    patch_embed_input_ids()
+    migrate_ds_buffers(model, device)
