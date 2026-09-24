@@ -267,6 +267,7 @@ def test_patched_forward_interpolate_pos_encoding_cpu_roundtrip():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_embeddings_forward")
 def test_patched_forward_output_matches_cpu_on_spyre():
     """The patched SigLIP embeddings forward on-card must produce a correctly-shaped
     output. The patch uses class-level patching with a single `device` closure, so
@@ -388,7 +389,36 @@ def test_patch_siglip_attention_target_symbol_exists():
     )
 
 
+@pytest.fixture(autouse=False)
+def _restore_siglip_embeddings_forward():
+    """Save and restore SiglipVisionEmbeddings.forward around each test.
+
+    patch_siglip_vision_embeddings sets a class-level _spyre_patched guard.
+    Without restoration, a previous test that patched with device='cpu' poisons
+    the closure for subsequent tests that need device='spyre'.
+    """
+    original = siglip.SiglipVisionEmbeddings.forward
+    yield
+    siglip.SiglipVisionEmbeddings.forward = original
+
+
+@pytest.fixture(autouse=False)
+def _restore_siglip_attention_forward():
+    """Save and restore SiglipAttention.forward around each test.
+
+    patch_siglip_attention sets a class-level _spyre_patched guard on
+    SiglipAttention.forward. Without restoration, the first test that calls
+    patch_siglip_attention poisons the guard for all subsequent tests in the
+    same process — they hit the early-return and the weight-padding loop
+    never runs.
+    """
+    original = siglip.SiglipAttention.forward
+    yield
+    siglip.SiglipAttention.forward = original
+
+
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_is_applied_and_idempotent():
     """`patch_siglip_attention` must set `_spyre_patched` on SiglipAttention.forward
     and a second call must be a no-op (same function in place)."""
@@ -407,6 +437,7 @@ def test_patch_siglip_attention_is_applied_and_idempotent():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_noop_for_aligned_head_dim():
     """`patch_siglip_attention` must skip models whose head_dim is already
     stick-aligned (head_dim % 64 == 0) — patching them would corrupt weights.
@@ -437,6 +468,7 @@ def test_patch_siglip_attention_noop_for_aligned_head_dim():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_pads_qkv_weight_shape():
     """After patching, qkv_proj.weight must be widened from [H, 3*H*orig_d] to [H, 3*H*pad_d]."""
     from spyre_inference.multimodal.siglip import patch_siglip_attention
@@ -457,6 +489,7 @@ def test_patch_siglip_attention_pads_qkv_weight_shape():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_pads_out_weight_shape():
     """After patching, out_proj.weight must be widened from [H*orig_d, H] to [H*pad_d, H]."""
     from spyre_inference.multimodal.siglip import patch_siglip_attention
@@ -474,6 +507,7 @@ def test_patch_siglip_attention_pads_out_weight_shape():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_qkv_weight_preserves_orig_values():
     """The original weights must appear in the correct interleaved positions after padding.
 
@@ -504,6 +538,7 @@ def test_patch_siglip_attention_qkv_weight_preserves_orig_values():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_with_bias():
     """qkv_proj bias must also be padded correctly when present."""
     from spyre_inference.multimodal.siglip import patch_siglip_attention
@@ -527,6 +562,7 @@ def test_patch_siglip_attention_with_bias():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_marks_instance_padded():
     """Each patched SiglipAttention instance must carry `_spyre_head_dim_padded=True`
     so a second `patch_siglip_attention` call does not re-pad already-widened weights."""
@@ -539,6 +575,7 @@ def test_patch_siglip_attention_marks_instance_padded():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_forward_output_shape():
     """The patched forward must return `(output, None)` where output is `[B, S, hidden]`."""
     from spyre_inference.multimodal.siglip import patch_siglip_attention
@@ -560,6 +597,7 @@ def test_patch_siglip_attention_forward_output_shape():
 
 
 @pytest.mark.siglip
+@pytest.mark.usefixtures("_restore_siglip_attention_forward")
 def test_patch_siglip_attention_scale_uses_orig_head_dim():
     """The attention scale must be fixed to orig_head_dim**-0.5, not pad_head_dim**-0.5.
 
