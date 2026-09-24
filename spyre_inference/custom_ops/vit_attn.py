@@ -32,7 +32,8 @@ from functools import lru_cache
 import torch
 from vllm.logger import init_logger
 
-from spyre_inference.multimodal.utils import padded_sdpa
+from spyre_inference.custom_ops.utils import convert
+from spyre_inference.multimodal.utils import align_up, padded_sdpa
 
 logger = init_logger(__name__)
 
@@ -54,8 +55,38 @@ def _padded_apply_sdpa(
     """Drop-in replacement for ``vit_attn_wrappers.apply_sdpa``.
 
     Input/output shape: ``(batch, seq, num_heads, head_size)``.
+
+    When head_dim (D) is not stick-aligned (e.g. SigLIP so400m D=72), any
+    on-device op that needs to re-layout the tensor (F.pad, clone, contiguous)
+    triggers a restickify whose store index contains a fractional coefficient
+    (``9*c2/8`` for D=72), which torch-spyre's inductor cannot lower
+    (torch-spyre#1353).  CPU offload is the only available workaround;
+    ``padded_sdpa`` then handles seq-alignment on CPU and the result is moved
+    back.  ``scale`` is fixed to the original D before any padding.
+
+    When D is already stick-aligned (e.g. CLIP/SigLIP-base D=64) the guard is
+    false and the code is identical to the original: no CPU round-trip.
     """
-    seq = q.shape[1]
+    b, seq, _, d = q.shape[0], q.shape[1], q.shape[2], q.shape[3]
+    if scale is None:
+        scale = d**-0.5
+
+    if align_up(d) != d:
+        # CPU offload: every on-device materialization of a D=non-stick tensor
+        # hits the fractional-stride assert in torch-spyre#1353.
+        target_device = q.device
+        q = convert(q, device="cpu")
+        k = convert(k, device="cpu")
+        v = convert(v, device="cpu")
+        q, k, v = (x.transpose(1, 2) for x in (q, k, v))  # -> (B, H, S, D)
+        out = padded_sdpa(q, k, v, _full_attend_mask(seq), scale=scale, enable_gqa=enable_gqa)
+        # Reshape to (B, S, H*D) on CPU before upload: the caller reshapes the
+        # output back to 3D anyway, and H*D is stick-aligned (e.g. 16*72=1152)
+        # while (B, S, H, D) with D=72 would cause "Invalid tiling" on upload.
+        # Matches what SpyreMMEncoderAttention.forward_oot does before convert().
+        out = out.transpose(1, 2).reshape(b, seq, -1)
+        return convert(out, device=target_device)
+
     q, k, v = (x.transpose(1, 2) for x in (q, k, v))  # -> (batch, heads, seq, head_size)
     out = padded_sdpa(q, k, v, _full_attend_mask(seq), scale=scale, enable_gqa=enable_gqa)
     return out.transpose(1, 2)
