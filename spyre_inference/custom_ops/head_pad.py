@@ -128,25 +128,35 @@ def _pad_fused_qkv(
     )
 
 
-def _is_target_attn_weight(name: str) -> bool:
-    """Exclude non-language-model weights (vision tower, projectors, qformers)."""
-    return not any(
-        k in name
-        for k in (
-            "vision_tower",
-            "vision_model",
-            "layerwise_projectors",
-            "spatial_projectors",
-            "qformer",
-        )
-    )
+def _is_target_attn_weight(name: str, text_prefix: str | None = None) -> bool:
+    """True when *name* is an attention weight that should be padded.
+
+    For composite (multimodal) checkpoints ``text_prefix`` is the dotted path
+    prefix under which the language backbone lives (e.g. ``"language_model."``).
+    Only weights under that prefix are padded; everything else (vision towers,
+    projectors, adapters) is left untouched.  This is an allowlist: any new
+    sub-model in the checkpoint that does not live under ``text_prefix``
+    automatically passes through unmodified, with no maintenance required here.
+
+    For single-config (text-only) checkpoints ``text_prefix`` is ``None`` and
+    every weight is a candidate — the original behaviour.
+    """
+    if text_prefix is not None:
+        return text_prefix in name
+    return True
 
 
 def _pad_weight(
-    name: str, w: torch.Tensor, n_heads: int, n_kv_heads: int, orig: int, padded: int
+    name: str,
+    w: torch.Tensor,
+    n_heads: int,
+    n_kv_heads: int,
+    orig: int,
+    padded: int,
+    text_prefix: str | None = None,
 ) -> torch.Tensor:
     """Dispatch a single checkpoint tensor to the right padding by its name."""
-    if not _is_target_attn_weight(name):
+    if not _is_target_attn_weight(name, text_prefix):
         return w
     # Must precede the v_proj test: "qkv_proj.weight" also ends with "v_proj.weight".
     if name.endswith(("qkv_proj.weight", "qkv_proj.bias")):
@@ -211,8 +221,8 @@ def install_padded_head_dim(model_config) -> None:
             text_cls, _ = model_config.registry.resolve_model_cls([arch], model_config=model_config)
             if text_cls and sys.modules.get(text_cls.__module__):
                 modules.add(sys.modules[text_cls.__module__])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Cannot resolve text backbone %r for head_dim shim: %s", arch, e)
 
     if not modules:
         logger.warning("Cannot locate modules for %s; head_dim not shimmed.", architectures)
@@ -294,13 +304,20 @@ def verify_padded_head_dim(model, hf_config) -> None:
         )
 
 
-def install_head_pad_weight_loader(model_loader, hf_config) -> None:
+def install_head_pad_weight_loader(model_loader, hf_config, model_config=None) -> None:
     """Wrap ``model_loader.get_all_weights`` to pad q/k/v/o head_dim 64->128.
 
     The transform runs on the raw ``(name, tensor)`` stream before vLLM's
     ``WeightsMapper`` and ``weight_loader`` (which ``.narrow`` and assert exact
     shapes against the now-128-wide params). Full unsharded tensors are padded
     per-head, so TP narrowing downstream still selects whole padded heads.
+
+    For composite (multimodal) checkpoints, where ``model_config.hf_text_config
+    is not model_config.hf_config``, only weights under the language backbone
+    prefix ``"language_model."`` are padded.  vLLM composite models consistently
+    store the text backbone under ``self.language_model`` (and therefore under
+    ``language_model.`` in the checkpoint), so this allowlist is forward-compatible
+    with any new composite architecture without requiring additions here.
     """
     if not head_padding_active(hf_config):
         return
@@ -316,11 +333,19 @@ def install_head_pad_weight_loader(model_loader, hf_config) -> None:
     n_heads = hf_config.num_attention_heads
     n_kv_heads = getattr(hf_config, "num_key_value_heads", None) or n_heads
 
+    # For composite (multimodal) models, restrict padding to the text backbone.
+    # vLLM composite models store the language backbone as ``self.language_model``,
+    # so its checkpoint weights live under the ``language_model.`` prefix.
+    text_prefix: str | None = None
+    if model_config is not None and model_config.hf_text_config is not model_config.hf_config:
+        text_prefix = "language_model."
+        logger.debug("Composite model detected; head padding restricted to prefix %r.", text_prefix)
+
     original_get_all_weights = model_loader.get_all_weights
 
     def padded_get_all_weights(model_config, model) -> Iterable[tuple[str, torch.Tensor]]:
         for name, weight in original_get_all_weights(model_config, model):
-            yield name, _pad_weight(name, weight, n_heads, n_kv_heads, orig, padded)
+            yield name, _pad_weight(name, weight, n_heads, n_kv_heads, orig, padded, text_prefix)
 
     model_loader.get_all_weights = padded_get_all_weights
 

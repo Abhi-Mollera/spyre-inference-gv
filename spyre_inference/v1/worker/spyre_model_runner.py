@@ -460,9 +460,7 @@ class _SpyreModelWrapper:
         with torch._dynamo.config.patch(capture_scalar_outputs=True):
             return self._model.embed_multimodal(**kwargs)
 
-    def embed_input_ids(
-        self, input_ids, multimodal_embeddings=None, *, is_multimodal=None
-    ):
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *, is_multimodal=None):
         """Move input_ids/is_multimodal/multimodal_embeddings onto Spyre.
 
         gpu_model_runner._preprocess calls this directly on `self.model`,
@@ -607,7 +605,9 @@ class TorchSpyreModelRunner(GPUModelRunner):
         # as they stream in, when the platform overrode head_dim (e.g. head_size=64).
         # Must run before load_model builds+loads the (now 128-wide) params.
         install_padded_head_dim(self.model_config)
-        install_head_pad_weight_loader(model_loader, self.model_config.hf_text_config)
+        install_head_pad_weight_loader(
+            model_loader, self.model_config.hf_text_config, self.model_config
+        )
         install_mlp_pad_weight_loader(model_loader, self.model_config.hf_text_config)
 
         # Load model on CPU
