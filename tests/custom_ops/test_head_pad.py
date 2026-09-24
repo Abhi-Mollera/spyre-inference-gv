@@ -343,12 +343,13 @@ _VIS_ORIG, _VIS_PADDED = 72, 128
 
 
 def test_vision_tower_weights_are_not_padded():
-    """Weight names under `vision_tower.*` must pass through _pad_weight unchanged.
+    """Weight names outside ``language_model.`` must pass through _pad_weight unchanged.
 
-    This is the direct guard on the silent-corruption path: the weight loader
-    streams every checkpoint tensor through _pad_weight; if a vision-tower
-    q_proj matched the language rule it would be interleaved at the wrong
-    head_dim and corrupt the SigLIP encoder on every forward pass.
+    ``install_head_pad_weight_loader`` passes ``text_prefix="language_model."`` for
+    composite checkpoints, restricting padding to the text backbone.  Vision-tower
+    weights that share suffix patterns with language attention weights (q_proj,
+    v_proj) must not be padded — they use a different head_dim and the interleave
+    would corrupt every Q/K/V shape in the vision encoder.
     """
     n_heads, hidden = 16, 1152  # SigLIP-SO400M dims
     rows = n_heads * _VIS_ORIG
@@ -359,11 +360,23 @@ def test_vision_tower_weights_are_not_padded():
         "vision_model.encoder.layers.0.self_attn.q_proj.weight",
         "vision_tower.encoder.layers.0.self_attn.v_proj.weight",
     ):
-        out = _pad_weight(layer_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED)
+        out = _pad_weight(layer_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED,
+                          text_prefix="language_model.")
         assert torch.equal(out, w), (
             f"_pad_weight must return the tensor unchanged for {layer_name!r}; "
             "vision-tower weights must not be padded with language head dims"
         )
+
+    # Positive side: a weight under the text backbone prefix must be padded.
+    # Guards against _is_target_attn_weight being broken in the other direction
+    # (returning False for everything would make all the assertions above pass
+    # trivially while silently leaving language weights unpadded).
+    lang_name = "language_model.model.layers.0.self_attn.q_proj.weight"
+    out = _pad_weight(lang_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED,
+                      text_prefix="language_model.")
+    assert not torch.equal(out, w), (
+        f"_pad_weight must pad {lang_name!r} when text_prefix matches"
+    )
 
 
 def test_text_backbone_attention_shimmed_when_in_separate_module(monkeypatch):
