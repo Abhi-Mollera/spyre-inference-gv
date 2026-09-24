@@ -14,13 +14,19 @@
 
 """BLIP-2 / Q-Former workarounds for Spyre.
 
-TODO: remove this file when spyre-inference moves to vLLM 0.30.0.
+Blip2QFormerMultiHeadAttention.forward contains an explicit
+torch.matmul / torch.softmax chain whose permute/matmul/softmax layout
+Spyre's restickify and bmm_padding passes cannot reconcile, so the entire
+module is run on CPU.
 
-Upstream switched Blip2QFormerMultiHeadAttention to use MMEncoderAttention in
-vllm-project/vllm@a1541f5, the same path SigLIP takes
-(vllm/model_executor/models/siglip.py:698).  SpyreMMEncoderAttention already
-covers that path, so once we upgrade the Q-Former attention runs on-card
-natively and this entire workaround becomes dead code.
+vllm-project/vllm@a1541f5 replaces that chain with a single
+F.scaled_dot_product_attention call, which SpyreMMEncoderAttention already
+handles natively.  Once we upgrade, the Q-Former attention runs on-card and
+this entire workaround becomes dead code.
+
+When that vLLM version is in use, test_vllm_blip2_qformer_uses_sdpa in
+tests/probes/test_spyre_fallback_probes.py will flip to XPASS, signalling that
+this file and its call site in apply() can be removed.
 """
 
 from __future__ import annotations
