@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 from vllm.logger import init_logger
@@ -188,20 +190,32 @@ def patch_siglip_attention(model: torch.nn.Module) -> None:
         num_heads = module.num_heads_per_partition
 
         qkv = module.qkv_proj
-        dev = qkv.weight.device
+        qkv_w = cast(torch.Tensor, qkv.weight)
+        dev = qkv_w.device
         qkv.weight = nn.Parameter(
-            _pad_qkv_weight(qkv.weight.data, num_heads, orig_head_dim, pad_head_dim).to(dev),
+            convert(
+                _pad_qkv_weight(qkv_w.data, num_heads, orig_head_dim, pad_head_dim),
+                device=dev,
+            ),
             requires_grad=False,
         )
         if qkv.bias is not None:
+            qkv_b = cast(torch.Tensor, qkv.bias)
             qkv.bias = nn.Parameter(
-                _pad_qkv_bias(qkv.bias.data, num_heads, orig_head_dim, pad_head_dim).to(dev),
+                convert(
+                    _pad_qkv_bias(qkv_b.data, num_heads, orig_head_dim, pad_head_dim),
+                    device=dev,
+                ),
                 requires_grad=False,
             )
 
         out = module.out_proj
+        out_w = cast(torch.Tensor, out.weight)
         out.weight = nn.Parameter(
-            _pad_out_weight(out.weight.data, num_heads, orig_head_dim, pad_head_dim).to(dev),
+            convert(
+                _pad_out_weight(out_w.data, num_heads, orig_head_dim, pad_head_dim),
+                device=dev,
+            ),
             requires_grad=False,
         )
         # out_proj bias is [hidden] — output dim, unchanged.
