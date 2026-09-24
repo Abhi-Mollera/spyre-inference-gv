@@ -360,8 +360,9 @@ def test_vision_tower_weights_are_not_padded():
         "vision_model.encoder.layers.0.self_attn.q_proj.weight",
         "vision_tower.encoder.layers.0.self_attn.v_proj.weight",
     ):
-        out = _pad_weight(layer_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED,
-                          text_prefix="language_model.")
+        out = _pad_weight(
+            layer_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED, text_prefix="language_model."
+        )
         assert torch.equal(out, w), (
             f"_pad_weight must return the tensor unchanged for {layer_name!r}; "
             "vision-tower weights must not be padded with language head dims"
@@ -372,11 +373,10 @@ def test_vision_tower_weights_are_not_padded():
     # (returning False for everything would make all the assertions above pass
     # trivially while silently leaving language weights unpadded).
     lang_name = "language_model.model.layers.0.self_attn.q_proj.weight"
-    out = _pad_weight(lang_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED,
-                      text_prefix="language_model.")
-    assert not torch.equal(out, w), (
-        f"_pad_weight must pad {lang_name!r} when text_prefix matches"
+    out = _pad_weight(
+        lang_name, w, n_heads, n_heads, _VIS_ORIG, _VIS_PADDED, text_prefix="language_model."
     )
+    assert not torch.equal(out, w), f"_pad_weight must pad {lang_name!r} when text_prefix matches"
 
 
 def test_text_backbone_attention_shimmed_when_in_separate_module(monkeypatch):

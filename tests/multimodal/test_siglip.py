@@ -285,8 +285,8 @@ def test_patched_forward_interpolate_pos_encoding_cpu_roundtrip():
 # attribute assignment (the same pattern the deleted test_mm_encoder_attention.py
 # used) to stay CPU-only and avoid the vLLM platform init in __init__.
 
-_ORIG_HEAD_DIM = 72   # SigLIP so400m native (not stick-aligned)
-_PAD_HEAD_DIM = 128   # align_up(72, 64)
+_ORIG_HEAD_DIM = 72  # SigLIP so400m native (not stick-aligned)
+_PAD_HEAD_DIM = 128  # align_up(72, 64)
 _NUM_HEADS_SIGLIP = 16
 _HIDDEN_SIGLIP = _NUM_HEADS_SIGLIP * _ORIG_HEAD_DIM  # 1152
 
@@ -296,9 +296,7 @@ class _FakeLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: int, bias: bool = False):
         super().__init__()
-        self.weight = nn.Parameter(
-            torch.zeros(in_features, out_features, dtype=torch.float16)
-        )
+        self.weight = nn.Parameter(torch.zeros(in_features, out_features, dtype=torch.float16))
         self.bias: nn.Parameter | None = (
             nn.Parameter(torch.zeros(out_features, dtype=torch.float16)) if bias else None
         )

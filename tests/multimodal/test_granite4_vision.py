@@ -373,7 +373,7 @@ def test_pack_and_unpad_result_on_correct_device_on_spyre():
 #   - self._ds_layer_indices  list of level indices (len = num_levels)
 #   - self._ds_num_tokens     written by the patch
 
-_LM_HIDDEN = 32   # small but realistic; must be divisible by the split
+_LM_HIDDEN = 32  # small but realistic; must be divisible by the split
 _MAX_TOKENS = 16
 _NUM_LEVELS = 2
 _EMBEDDING_MULTIPLIER = 0.5
@@ -406,17 +406,20 @@ class _MinimalGranite4VisionEmbedModel:
     def __init__(self, num_levels: int = _NUM_LEVELS):
         self.language_model = _MinimalLanguageModel()
         self._ds_buffers = [
-            torch.zeros(_MAX_TOKENS, _LM_HIDDEN, dtype=torch.float16)
-            for _ in range(num_levels)
+            torch.zeros(_MAX_TOKENS, _LM_HIDDEN, dtype=torch.float16) for _ in range(num_levels)
         ]
         self._ds_layer_indices = list(range(num_levels))
         self._ds_num_tokens = -1  # sentinel; will be overwritten by the patch
 
-    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *, is_multimodal=None,
-                        handle_oov_mm_token=True):
+    def embed_input_ids(
+        self, input_ids, multimodal_embeddings=None, *, is_multimodal=None, handle_oov_mm_token=True
+    ):
         cls = granite4_vision.Granite4VisionForConditionalGeneration
         return cls.embed_input_ids(
-            self, input_ids, multimodal_embeddings, is_multimodal=is_multimodal,
+            self,
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
@@ -471,7 +474,8 @@ def test_patch_embed_input_ids_text_only_path():
     torch.testing.assert_close(
         result.float(),
         (expected_embeds * _EMBEDDING_MULTIPLIER).float(),
-        atol=1e-4, rtol=1e-4,
+        atol=1e-4,
+        rtol=1e-4,
     )
 
 
@@ -569,7 +573,8 @@ def test_patch_embed_input_ids_vision_path_fills_ds_buffers():
         torch.testing.assert_close(
             buf_slice[is_multimodal].float(),
             level_features[lvl].float(),
-            atol=1e-4, rtol=1e-4,
+            atol=1e-4,
+            rtol=1e-4,
             msg=f"level {lvl}: ds_buffer image rows do not match packed features",
         )
         assert not buf_slice[~is_multimodal].any(), (
@@ -591,8 +596,7 @@ def test_patch_embed_input_ids_ds_buffers_migrated_to_correct_device():
 
     # Deliberately initialise buffers in float32 to trigger the dtype migration.
     obj._ds_buffers = [
-        torch.zeros(_MAX_TOKENS, _LM_HIDDEN, dtype=torch.float32)
-        for _ in range(_NUM_LEVELS)
+        torch.zeros(_MAX_TOKENS, _LM_HIDDEN, dtype=torch.float32) for _ in range(_NUM_LEVELS)
     ]
 
     input_ids = torch.arange(4)
