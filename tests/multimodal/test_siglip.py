@@ -30,6 +30,7 @@ import sys
 import pytest
 import torch
 import torch.nn as nn
+
 siglip = pytest.importorskip("vllm.model_executor.models.siglip")
 
 # SigLIP-SO400M/patch-14-384 dimensions (Granite Vision 4.1 default).
@@ -565,15 +566,13 @@ def test_patch_siglip_attention_scale_uses_orig_head_dim():
     and corrupt the encoder's attention pattern.  Verified indirectly: running the
     patched forward with a manually-computed reference at the correct scale.
     """
-    import math
-
+    from spyre_inference.custom_ops.vit_attn import _full_attend_mask
     from spyre_inference.multimodal.siglip import (
         _pad_out_weight,
         _pad_qkv_weight,
         patch_siglip_attention,
     )
     from spyre_inference.multimodal.utils import padded_sdpa
-    from spyre_inference.custom_ops.vit_attn import _full_attend_mask
 
     model = _make_model_with_siglip_attention()
     attn = model.attn

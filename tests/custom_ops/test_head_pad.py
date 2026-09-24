@@ -396,7 +396,7 @@ def test_text_backbone_attention_shimmed_when_in_separate_module(monkeypatch):
     top_module = types.ModuleType(top_module_name)
     model_cls = type("GraniteVisionForConditionalGeneration", (), {})
     model_cls.__module__ = top_module_name
-    setattr(top_module, "GraniteVisionForConditionalGeneration", model_cls)
+    top_module.GraniteVisionForConditionalGeneration = model_cls
     monkeypatch.setitem(sys.modules, top_module_name, top_module)
 
     # Text backbone module: contains GraniteAttention (mirrors granite.py).
@@ -410,8 +410,8 @@ def test_text_backbone_attention_shimmed_when_in_separate_module(monkeypatch):
     GraniteAttention.__module__ = text_module_name
     text_cls = type("GraniteForCausalLM", (), {})
     text_cls.__module__ = text_module_name
-    setattr(text_module, "GraniteAttention", GraniteAttention)
-    setattr(text_module, "GraniteForCausalLM", text_cls)
+    text_module.GraniteAttention = GraniteAttention
+    text_module.GraniteForCausalLM = text_cls
     monkeypatch.setitem(sys.modules, text_module_name, text_module)
 
     hf_config = SimpleNamespace(

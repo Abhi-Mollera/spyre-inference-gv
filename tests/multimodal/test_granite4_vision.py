@@ -513,7 +513,9 @@ def test_patch_embed_input_ids_vision_path_zeros_image_positions():
 
     # multimodal_embeddings: one tensor of shape [num_img_tokens, lm_hidden * num_levels]
     rng = torch.Generator(device="cpu").manual_seed(10)
-    mm_emb = torch.randn(num_img_tokens, _LM_HIDDEN * _NUM_LEVELS, dtype=torch.float16, generator=rng)
+    mm_emb = torch.randn(
+        num_img_tokens, _LM_HIDDEN * _NUM_LEVELS, dtype=torch.float16, generator=rng
+    )
 
     input_ids = torch.arange(N)
     result = obj.embed_input_ids(input_ids, [mm_emb], is_multimodal=is_multimodal)
@@ -550,7 +552,9 @@ def test_patch_embed_input_ids_vision_path_fills_ds_buffers():
     is_multimodal[6] = True
 
     rng = torch.Generator(device="cpu").manual_seed(20)
-    mm_emb = torch.randn(num_img_tokens, _LM_HIDDEN * _NUM_LEVELS, dtype=torch.float16, generator=rng)
+    mm_emb = torch.randn(
+        num_img_tokens, _LM_HIDDEN * _NUM_LEVELS, dtype=torch.float16, generator=rng
+    )
 
     input_ids = torch.arange(N)
     obj.embed_input_ids(input_ids, [mm_emb], is_multimodal=is_multimodal)
