@@ -17,10 +17,15 @@
 from __future__ import annotations
 
 import torch
+from vllm.logger import init_logger
+
+from spyre_inference.custom_ops.utils import convert
+
+logger = init_logger(__name__)
 
 
 def patch_siglip_vision_embeddings(model: torch.nn.Module, device: torch.device) -> None:
-    """Move SiglipVisionEmbeddings position_embedding and position_ids to CPU.
+    """Patch SiglipVisionEmbeddings.forward to run the position embedding on CPU.
 
     aten.embedding(position_embedding.weight, position_ids) called eagerly on
     Spyre tensors hits torch-spyre's compile_once eager kernel, causing Dynamo
@@ -32,6 +37,9 @@ def patch_siglip_vision_embeddings(model: torch.nn.Module, device: torch.device)
     except ImportError:
         return
 
+    if getattr(SiglipVisionEmbeddings.forward, "_spyre_patched", False):
+        return
+
     def _siglip_embeddings_forward(
         self: SiglipVisionEmbeddings,
         pixel_values: torch.Tensor,
@@ -41,20 +49,21 @@ def patch_siglip_vision_embeddings(model: torch.nn.Module, device: torch.device)
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        # Download once: position_embedding and position_ids are pinned to CPU
+        # (see module setup below), and aten.embedding / aten.add called eagerly
+        # on Spyre tensors hit compile_once, causing Dynamo re-entrancy.
+        embeddings_cpu = convert(embeddings, device="cpu")
         if interpolate_pos_encoding:
-            # interpolate_pos_encoding reads position_embedding.weight and
-            # position_ids, both pinned to CPU.  Round-trip embeddings through
-            # CPU so the add doesn't produce a device mismatch.
-            pos_emb = self.interpolate_pos_encoding(embeddings.to("cpu"), height, width)
-            embeddings = (embeddings.to("cpu") + pos_emb).to(device)
+            pos_emb = self.interpolate_pos_encoding(embeddings_cpu, height, width)
         else:
-            # Both the embedding lookup and the add run on CPU to avoid
-            # torch-spyre's compile_once re-entrancy (aten.embedding and
-            # aten.add both hit compile_once when called eagerly on Spyre).
             pos_emb = self.position_embedding(self.position_ids)
-            embeddings = (embeddings.to("cpu") + pos_emb).to(device)
-        return embeddings
+        return convert(embeddings_cpu + pos_emb, device=device)
 
+    _siglip_embeddings_forward._spyre_patched = True  # type: ignore[attr-defined]
+    SiglipVisionEmbeddings.forward = _siglip_embeddings_forward  # type: ignore[method-assign]
+
+    # Pin weights and buffers to CPU on every existing instance so the forward
+    # replacement can perform the embedding lookup there without a device mismatch.
     for module in model.modules():
         if isinstance(module, SiglipVisionEmbeddings):
             module.position_embedding.to("cpu")
@@ -63,7 +72,11 @@ def patch_siglip_vision_embeddings(model: torch.nn.Module, device: torch.device)
                 module.position_ids.to("cpu"),  # ty: ignore[invalid-argument-type]
                 persistent=False,
             )
-            module.forward = _siglip_embeddings_forward.__get__(module)  # ty: ignore[invalid-assignment]
+
+    logger.info(
+        "Spyre: patched SiglipVisionEmbeddings.forward to run the position "
+        "embedding lookup on CPU (aten.embedding not traceable on Spyre)."
+    )
 
 
 def apply(model: torch.nn.Module, device: torch.device) -> None:
